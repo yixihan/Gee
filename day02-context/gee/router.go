@@ -23,7 +23,7 @@ func (r *router) addRoute(method, pattern string, handler HandlerFunc) {
 	r.handler[key] = handler
 }
 
-// handle 路由
+// handle 路由匹配
 func (r *router) handle(c *Context) {
 	log.Printf("Route %4s - %s", c.Method, c.Path)
 	key := c.Method + "-" + c.Path
