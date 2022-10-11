@@ -1,0 +1,133 @@
+package gee
+
+import (
+	"html/template"
+	"log"
+	"net/http"
+	"path"
+	"strings"
+)
+
+// HandlerFunc 定义了 gee 使用的请求处理程序, 参数为自定义的 Context
+type HandlerFunc func(*Context)
+
+type (
+	// Engine 实现 ServeHTTP 接口
+	Engine struct {
+		// RouterGroup 路由组指针
+		*RouterGroup
+		// router 路由
+		router *router
+		// groups 路由组数组
+		groups []*RouterGroup
+		// htmlTemplates 将所有的模板加载进内存
+		htmlTemplates *template.Template
+		// funcMap 所有的自定义模板渲染函数
+		funcMap template.FuncMap
+	}
+
+	// RouterGroup 路由组
+	RouterGroup struct {
+		// prefix 前缀
+		prefix string
+		// middlewares 中间件
+		middlewares []HandlerFunc
+		// parent 父路由组
+		parent *RouterGroup
+		// engine engine
+		engine *Engine
+	}
+)
+
+// New Engine 构造函数
+func New() *Engine {
+	engine := &Engine{router: newRouter()}
+	engine.RouterGroup = &RouterGroup{engine: engine}
+	engine.groups = []*RouterGroup{engine.RouterGroup}
+	return engine
+}
+
+// Group RouterGroup 构造函数
+func (group *RouterGroup) Group(prefix string) *RouterGroup {
+	engine := group.engine
+	newGroup := &RouterGroup{
+		prefix: group.prefix + prefix,
+		parent: group,
+		engine: engine,
+	}
+	engine.groups = append(engine.groups, newGroup)
+	return newGroup
+}
+
+func (e *Engine) SetFuncMap(funcMap template.FuncMap) {
+	e.funcMap = funcMap
+}
+
+func (e *Engine) LoadHTMLGlob(pattern string) {
+	e.htmlTemplates = template.Must(template.New("").Funcs(e.funcMap).ParseGlob(pattern))
+}
+
+// addRoute 添加一个新的路由
+func (group *RouterGroup) addRoute(method, comp string, handler HandlerFunc) {
+	pattern := group.prefix + comp
+	log.Printf("Route %4s - %s\n", method, pattern)
+	group.engine.router.addRoute(method, pattern, handler)
+}
+
+//GET 定义添加 GET 请求的方法
+func (group *RouterGroup) GET(pattern string, handler HandlerFunc) {
+	group.addRoute("GET", pattern, handler)
+}
+
+//POST 定义添加 POST 请求的方法
+func (group *RouterGroup) POST(pattern string, handler HandlerFunc) {
+	group.addRoute("POST", pattern, handler)
+}
+
+// createStaticHandler 创建一个静态 handler
+func (group *RouterGroup) createStaticHandler(relativePath string, fs http.FileSystem) HandlerFunc {
+	absolutePath := path.Join(group.prefix, relativePath)
+	fileServer := http.StripPrefix(absolutePath, http.FileServer(fs))
+	return func(c *Context) {
+		file := c.Param("filepath")
+		if _, err := fs.Open(file); err != nil {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		fileServer.ServeHTTP(c.Writer, c.Req)
+	}
+}
+
+// Static 添加一个静态文件路由
+func (group *RouterGroup) Static(relativePath string, root string) {
+	handler := group.createStaticHandler(relativePath, http.Dir(root))
+	urlPattern := path.Join(relativePath, "/*filepath")
+
+	// 注册路由
+	group.GET(urlPattern, handler)
+}
+
+//Run 定义启动 http 服务器的方法
+func (e *Engine) Run(addr string) (err error) {
+	return http.ListenAndServe(addr, e)
+}
+
+func (group *RouterGroup) Use(middlewares ...HandlerFunc) {
+	group.middlewares = append(group.middlewares, middlewares...)
+}
+
+//ServeHTTP 自定义实现的的 ServeHTTP 方法, 具体处理逻辑放在 router.go
+func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	middlewares := make([]HandlerFunc, 0)
+	for _, group := range e.groups {
+		if strings.HasPrefix(r.URL.Path, group.prefix) {
+			middlewares = append(middlewares, group.middlewares...)
+		}
+	}
+	c := NewContext(r, w)
+	c.handlers = middlewares
+	c.engine = e
+	e.router.handle(c)
+	log.Print(c.Params)
+}
